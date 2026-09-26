@@ -1,3 +1,4 @@
+import { ACCEPTANCE_TRACKS, acceptanceStatus, describeAcceptance, trackLabel } from './acceptance';
 import type { ComponentSnapshot, ComponentSpec, DiffRow } from './types';
 
 const selectedFields: Array<Exclude<keyof ComponentSpec, 'snapshots'>> = [
@@ -24,4 +25,17 @@ export function diffAgainstSnapshot(component: ComponentSpec, snapshot?: Compone
   const afterExamples = format(component.examples);
   if (beforeExamples !== afterExamples) rows.push({ field: 'examples', before: beforeExamples, after: afterExamples });
   return rows;
+}
+
+/**
+ * 验收结论对照：快照留档时的状态（含登记依据）与当前状态逐方向列出，
+ * 无论是否变化都保留一行，以便看出哪些结论失效、哪些仍然有效。
+ */
+export function acceptanceDiffRows(component: ComponentSpec, snapshot?: ComponentSnapshot): DiffRow[] {
+  if (!snapshot) return [];
+  return ACCEPTANCE_TRACKS.map((track) => ({
+    field: `${trackLabel(track)}验收`,
+    before: describeAcceptance(acceptanceStatus(snapshot.component, track), true),
+    after: describeAcceptance(acceptanceStatus(component, track))
+  }));
 }

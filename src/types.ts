@@ -11,6 +11,20 @@ export interface PropertySpec {
   description: string;
 }
 
+export type AcceptanceTrack = 'keyboard' | 'screenReader';
+export type AcceptanceConclusion = 'pass' | 'fail';
+
+export interface AcceptanceRecord {
+  id: string;
+  track: AcceptanceTrack;
+  inspector: string;
+  basis: string;
+  conclusion: AcceptanceConclusion;
+  revision: number;
+  fingerprint: string;
+  createdAt: string;
+}
+
 export interface ComponentExample {
   id: string;
   title: string;
@@ -35,6 +49,7 @@ export interface ComponentSpec {
   disabledScenarios: string;
   interactionSignature: string;
   examples: ComponentExample[];
+  acceptance: AcceptanceRecord[];
   revision: number;
   updatedAt: string;
   snapshots: ComponentSnapshot[];

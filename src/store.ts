@@ -1,5 +1,6 @@
+import { ACCEPTANCE_TRACKS, acceptanceFingerprint, acceptanceStatus, publishBlockers, trackLabel } from './acceptance';
 import { createInitialState } from './data';
-import type { ComponentSnapshot, ComponentSpec, ValidationIssue, WorkspaceState } from './types';
+import type { AcceptanceConclusion, AcceptanceTrack, ComponentSnapshot, ComponentSpec, ValidationIssue, WorkspaceState } from './types';
 
 const STORAGE_KEY = 'sologsb-1028-workspace-v1';
 
@@ -49,6 +50,7 @@ export class SpecStore extends EventTarget {
       disabledScenarios: '记录不应使用该组件的场景。',
       interactionSignature: '',
       examples: [],
+      acceptance: [],
       revision: 1,
       updatedAt: new Date().toISOString(),
       snapshots: []
@@ -176,6 +178,35 @@ export class SpecStore extends EventTarget {
     });
   }
 
+  recordAcceptance(track: AcceptanceTrack, entry: { inspector: string; basis: string; conclusion: AcceptanceConclusion }) {
+    const selected = this.selected;
+    if (!selected) return;
+    this.commit('登记验收结论', (state) => {
+      const target = state.components.find((item) => item.id === selected.id);
+      if (!target) return;
+      target.acceptance.push({
+        id: uid('acceptance'),
+        track,
+        inspector: entry.inspector.trim() || '未署名',
+        basis: entry.basis.trim(),
+        conclusion: entry.conclusion,
+        revision: target.revision,
+        fingerprint: acceptanceFingerprint(target, track),
+        createdAt: new Date().toISOString()
+      });
+      target.updatedAt = new Date().toISOString();
+    });
+  }
+
+  publishSelected(): string | null {
+    const selected = this.selected;
+    if (!selected) return '未选择组件。';
+    const blockers = publishBlockers(selected);
+    if (blockers.length) return blockers.join('；');
+    this.updateComponent({ status: 'published' });
+    return null;
+  }
+
   migrateExamples() {
     const selected = this.selected;
     if (!selected) return;
@@ -221,6 +252,18 @@ export class SpecStore extends EventTarget {
       }
       if (!component.screenReader.trim()) {
         issues.push({ id: `${component.id}-screenreader`, level: 'error', componentId: component.id, target: component.name, message: '缺少读屏说明。', field: 'screenReader' });
+      }
+      for (const track of ACCEPTANCE_TRACKS) {
+        const status = acceptanceStatus(component, track);
+        const label = trackLabel(track);
+        const failed = status.validity === 'valid' && status.record?.conclusion === 'fail';
+        const stale = status.validity === 'stale-contract' || status.validity === 'stale-revision';
+        if (component.status === 'published' && (status.validity !== 'valid' || failed)) {
+          const reason = status.validity === 'missing' ? '尚未登记验收结论。' : failed ? '最新结论为不通过。' : status.detail;
+          issues.push({ id: `${component.id}-${track}-acceptance`, level: 'error', componentId: component.id, target: component.name, message: `已发布组件缺少当前版本有效的${label}验收结论：${reason}`, field: track });
+        } else if (stale || failed) {
+          issues.push({ id: `${component.id}-${track}-acceptance`, level: 'warning', componentId: component.id, target: component.name, message: failed ? `${label}验收最新结论为不通过。` : `${label}验收记录已失效：${status.detail}`, field: track });
+        }
       }
       if (contractChanged && component.examples.length) {
         issues.push({ id: `${component.id}-contract`, level: 'info', componentId: component.id, target: component.name, message: '属性契约或交互签名发生变化，建议创建快照并迁移示例。', field: 'properties' });
@@ -271,7 +314,16 @@ export class SpecStore extends EventTarget {
   private load(): WorkspaceState {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) return JSON.parse(saved) as WorkspaceState;
+      if (saved) {
+        const parsed = JSON.parse(saved) as WorkspaceState;
+        for (const component of parsed.components) {
+          component.acceptance ??= [];
+          component.snapshots?.forEach((snapshot) => {
+            snapshot.component.acceptance ??= [];
+          });
+        }
+        return parsed;
+      }
     } catch {
       // A corrupted local draft falls back to the bundled demo data.
     }

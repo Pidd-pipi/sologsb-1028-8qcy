@@ -1,8 +1,9 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit';
 import { repeat } from 'lit/directives/repeat.js';
-import { diffAgainstSnapshot } from './diff';
+import { ACCEPTANCE_TRACKS, acceptanceStatus, trackLabel } from './acceptance';
+import { acceptanceDiffRows, diffAgainstSnapshot } from './diff';
 import { SpecStore } from './store';
-import type { ComponentExample, ComponentSpec, PreviewDensity, PreviewTheme, PropertySpec, ValidationIssue } from './types';
+import type { AcceptanceTrack, ComponentExample, ComponentSpec, PreviewDensity, PreviewTheme, PropertySpec, ValidationIssue } from './types';
 
 type EditorTab = 'overview' | 'api' | 'accessibility' | 'examples' | 'history';
 
@@ -246,7 +247,7 @@ export class SpecA11yWorkbench extends LitElement {
           <p>${component.purpose}</p>
         </div>
         <div class="actions">
-          <select aria-label="组件状态" .value=${component.status} @change=${(event: Event) => this.store.updateComponent({ status: (event.currentTarget as HTMLSelectElement).value as ComponentSpec['status'] })}>
+          <select aria-label="组件状态" .value=${component.status} @change=${(event: Event) => this.changeStatus(event, component.status)}>
             <option value="draft">草稿</option>
             <option value="review">待审</option>
             <option value="published">已发布</option>
@@ -295,12 +296,13 @@ export class SpecA11yWorkbench extends LitElement {
           <h2>属性契约</h2>
           <sp-button size="s" variant="secondary" @click=${() => this.store.addProperty()}>新增属性</sp-button>
         </div>
+        <p class="item-meta" style="margin: 0 0 12px">属性增删或修改会使键盘与读屏验收记录同时失效。</p>
         <div class="property-list">
           ${component.properties.length ? repeat(component.properties, (item) => item.id, (property) => this.renderProperty(property)) : html`<div class="empty">尚未定义属性。</div>`}
         </div>
         <div class="form-grid" style="margin-top: 18px">
           <label class="field full"><span>状态说明</span><textarea .value=${component.states} @change=${(event: Event) => this.store.updateComponent({ states: (event.currentTarget as HTMLTextAreaElement).value })}></textarea></label>
-          <label class="field full"><span>交互签名（修改后会标记关联示例失效）</span><textarea .value=${component.interactionSignature} @change=${(event: Event) => this.store.updateComponent({ interactionSignature: (event.currentTarget as HTMLTextAreaElement).value }, true)}></textarea></label>
+          <label class="field full"><span>交互签名（修改后关联示例与键盘验收将失效）</span><textarea .value=${component.interactionSignature} @change=${(event: Event) => this.store.updateComponent({ interactionSignature: (event.currentTarget as HTMLTextAreaElement).value }, true)}></textarea></label>
         </div>
       </section>
     `;
@@ -328,12 +330,83 @@ export class SpecA11yWorkbench extends LitElement {
     return html`
       <section class="panel">
         <div class="form-grid">
-          <label class="field full"><span>键盘行为</span><textarea .value=${component.keyboardBehavior} @change=${(event: Event) => this.store.updateComponent({ keyboardBehavior: (event.currentTarget as HTMLTextAreaElement).value }, true)}></textarea></label>
-          <label class="field full"><span>读屏说明</span><textarea .value=${component.screenReader} @change=${(event: Event) => this.store.updateComponent({ screenReader: (event.currentTarget as HTMLTextAreaElement).value })}></textarea></label>
+          <label class="field full"><span>键盘行为（修改后键盘验收记录将失效）</span><textarea .value=${component.keyboardBehavior} @change=${(event: Event) => this.store.updateComponent({ keyboardBehavior: (event.currentTarget as HTMLTextAreaElement).value }, true)}></textarea></label>
+          <label class="field full"><span>读屏说明（修改后读屏验收记录将失效）</span><textarea .value=${component.screenReader} @change=${(event: Event) => this.store.updateComponent({ screenReader: (event.currentTarget as HTMLTextAreaElement).value })}></textarea></label>
           <label class="field full"><span>禁用场景</span><textarea .value=${component.disabledScenarios} @change=${(event: Event) => this.store.updateComponent({ disabledScenarios: (event.currentTarget as HTMLTextAreaElement).value })}></textarea></label>
         </div>
       </section>
+      ${this.renderAcceptance(component)}
     `;
+  }
+
+  private renderAcceptance(component: ComponentSpec): TemplateResult {
+    return html`
+      <section class="panel" style="margin-top: 16px" aria-label="无障碍验收记录">
+        <div class="property-head">
+          <h2>验收记录</h2>
+          <span class="item-meta">发布前，键盘与读屏均需当前版本（r${component.revision}）的有效结论。</span>
+        </div>
+        <div class="property-list">
+          ${ACCEPTANCE_TRACKS.map((track) => this.renderAcceptanceTrack(component, track))}
+        </div>
+      </section>
+    `;
+  }
+
+  private renderAcceptanceTrack(component: ComponentSpec, track: AcceptanceTrack): TemplateResult {
+    const status = acceptanceStatus(component, track);
+    const record = status.record;
+    const pillLabel = { valid: '有效', missing: '未验收', 'stale-contract': '已失效', 'stale-revision': '已失效' }[status.validity];
+    return html`
+      <article class="property-card">
+        <div class="property-head">
+          <strong>${trackLabel(track)}验收</strong>
+          <span class="pill ${status.validity === 'valid' ? 'published' : 'review'}">${pillLabel}</span>
+        </div>
+        ${record ? html`
+          <div class="issue ${status.validity !== 'valid' ? 'warning' : record.conclusion === 'pass' ? 'info' : 'error'}">
+            <strong>结论：${record.conclusion === 'pass' ? '通过' : '不通过'} · 检查人 ${record.inspector} · 绑定 r${record.revision}</strong>
+            依据：${record.basis || '（未填写）'}<br />
+            登记于 ${new Date(record.createdAt).toLocaleString('zh-CN')} · ${status.detail}
+          </div>
+        ` : html`<div class="issue info"><strong>尚未登记</strong>该方向还没有任何验收结论。</div>`}
+        <form class="form-grid" @submit=${(event: SubmitEvent) => this.submitAcceptance(event, track)}>
+          <label class="field"><span>检查人</span><input name="inspector" type="text" required placeholder="姓名或工号" /></label>
+          <label class="field"><span>结论</span><select name="conclusion"><option value="pass">通过</option><option value="fail">不通过</option></select></label>
+          <label class="field full"><span>验收依据</span><textarea name="basis" required placeholder="测试清单、环境、辅助技术版本等"></textarea></label>
+          <div class="field full">
+            <sp-button variant="accent" @click=${(event: Event) => (event.currentTarget as HTMLElement).closest('form')?.requestSubmit()}>登记结论（绑定 r${component.revision}）</sp-button>
+          </div>
+        </form>
+      </article>
+    `;
+  }
+
+  private submitAcceptance(event: SubmitEvent, track: AcceptanceTrack) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget as HTMLFormElement);
+    this.store.recordAcceptance(track, {
+      inspector: String(data.get('inspector') ?? ''),
+      basis: String(data.get('basis') ?? ''),
+      conclusion: data.get('conclusion') === 'fail' ? 'fail' : 'pass'
+    });
+    this.flash(`${trackLabel(track)}验收结论已登记，绑定当前版本`);
+  }
+
+  private changeStatus(event: Event, current: ComponentSpec['status']) {
+    const select = event.currentTarget as HTMLSelectElement;
+    const next = select.value as ComponentSpec['status'];
+    if (next === 'published' && current !== 'published') {
+      const error = this.store.publishSelected();
+      if (error) {
+        select.value = current;
+        this.flash(`无法发布：${error}`);
+        return;
+      }
+      this.flash('已发布：两项验收结论对当前版本有效');
+      return;
+    }
+    this.store.updateComponent({ status: next });
   }
 
   private renderExamples(component: ComponentSpec): TemplateResult {
@@ -385,6 +458,7 @@ export class SpecA11yWorkbench extends LitElement {
   private renderHistory(component: ComponentSpec): TemplateResult {
     const snapshot = component.snapshots[0];
     const rows = diffAgainstSnapshot(component, snapshot);
+    const acceptanceRows = acceptanceDiffRows(component, snapshot);
     return html`
       <section class="panel">
         <div class="property-head">
@@ -395,6 +469,10 @@ export class SpecA11yWorkbench extends LitElement {
         ${snapshot ? html`
           <h3>与最近快照的差异</h3>
           ${rows.length ? html`<div class="diff">${rows.map((row) => html`<div class="diff-row"><b>${row.field}</b><span class="before">- ${row.before || '（空）'}</span><br /><span class="after">+ ${row.after || '（空）'}</span></div>`)}</div>` : html`<div class="issue info">当前内容与最近快照一致。</div>`}
+          <h3>验收结论对照（快照已留档验收依据）</h3>
+          <div class="diff">
+            ${acceptanceRows.map((row) => html`<div class="diff-row"><b>${row.field}</b><span class="before">快照：${row.before}</span><br /><span class="after">当前：${row.after}</span></div>`)}
+          </div>
         ` : html`<div class="empty">保存一次版本后即可比较字段、属性和示例变化。</div>`}
         ${this.hasStaleExamples(component) ? html`<div class="issue warning" style="margin-top: 14px"><strong>检测到待迁移示例</strong>迁移会保留代码内容，清理已删除属性引用并更新契约版本。<br /><button @click=${() => this.store.migrateExamples()}>立即迁移</button></div>` : nothing}
       </section>
