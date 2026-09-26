@@ -1,11 +1,23 @@
+import { acceptanceState, contentFingerprint, propertyContractFingerprint, publishBlockers } from './acceptance';
 import { createInitialState } from './data';
-import type { ComponentSnapshot, ComponentSpec, ValidationIssue, WorkspaceState } from './types';
+import type { AcceptanceConclusion, AcceptanceKind, ComponentSnapshot, ComponentSpec, ValidationIssue, WorkspaceState } from './types';
 
 const STORAGE_KEY = 'sologsb-1028-workspace-v1';
 
 const clone = <T>(value: T): T => structuredClone(value);
 const uid = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const signature = (component: ComponentSpec) => `${component.properties.map((item) => `${item.name}:${item.required}`).join('|')}::${component.interactionSignature}`;
+
+/** 旧版本存档没有验收记录字段，读取时补齐，避免污染运行时数据。 */
+const normalizeState = (state: WorkspaceState): WorkspaceState => {
+  state.components.forEach((component) => {
+    component.acceptance ??= [];
+    component.snapshots?.forEach((snapshot) => {
+      snapshot.component.acceptance ??= [];
+    });
+  });
+  return state;
+};
 
 export class SpecStore extends EventTarget {
   state: WorkspaceState;
@@ -49,6 +61,7 @@ export class SpecStore extends EventTarget {
       disabledScenarios: '记录不应使用该组件的场景。',
       interactionSignature: '',
       examples: [],
+      acceptance: [],
       revision: 1,
       updatedAt: new Date().toISOString(),
       snapshots: []
@@ -155,6 +168,57 @@ export class SpecStore extends EventTarget {
     });
   }
 
+  addAcceptance(kind: AcceptanceKind, draft: { inspector: string; basis: string; conclusion: AcceptanceConclusion }) {
+    const selected = this.selected;
+    if (!selected) return;
+    const inspector = draft.inspector.trim();
+    const basis = draft.basis.trim();
+    if (!inspector || !basis) return;
+    this.commit(`登记${kind === 'keyboard' ? '键盘' : '读屏'}验收`, (state) => {
+      const target = state.components.find((item) => item.id === selected.id);
+      if (!target) return;
+      target.acceptance.push({
+        id: uid('acceptance'),
+        kind,
+        inspector,
+        basis,
+        conclusion: draft.conclusion,
+        checkedAt: new Date().toISOString(),
+        revision: target.revision,
+        contentFingerprint: contentFingerprint(target, kind),
+        contractFingerprint: propertyContractFingerprint(target)
+      });
+      target.updatedAt = new Date().toISOString();
+    });
+  }
+
+  removeAcceptance(recordId: string) {
+    const selected = this.selected;
+    if (!selected) return;
+    this.commit('删除验收记录', (state) => {
+      const target = state.components.find((item) => item.id === selected.id);
+      if (target) target.acceptance = target.acceptance.filter((record) => record.id !== recordId);
+    });
+  }
+
+  /** 发布门禁：两项验收都对当前版本有效且通过才允许发布；返回 null 表示成功，否则为原因。 */
+  publishComponent(): string | null {
+    const selected = this.selected;
+    if (!selected) return null;
+    const blockers = publishBlockers(selected);
+    if (blockers.length) {
+      return `无法发布：${blockers.join('；')}。请在「无障碍」面板登记当前版本的验收结论。`;
+    }
+    this.commit('发布组件', (state) => {
+      const target = state.components.find((item) => item.id === selected.id);
+      if (target) {
+        target.status = 'published';
+        target.updatedAt = new Date().toISOString();
+      }
+    });
+    return null;
+  }
+
   createSnapshot(reason = '手动版本') {
     const selected = this.selected;
     if (!selected) return;
@@ -222,6 +286,39 @@ export class SpecStore extends EventTarget {
       if (!component.screenReader.trim()) {
         issues.push({ id: `${component.id}-screenreader`, level: 'error', componentId: component.id, target: component.name, message: '缺少读屏说明。', field: 'screenReader' });
       }
+      for (const kind of ['keyboard', 'screenReader'] as const) {
+        const label = kind === 'keyboard' ? '键盘' : '读屏';
+        const state = acceptanceState(component, kind);
+        if (state.record && !state.valid) {
+          issues.push({
+            id: `${component.id}-${kind}-acceptance-stale`,
+            level: 'warning',
+            componentId: component.id,
+            target: component.name,
+            message: `${label}验收记录（r${state.record.revision} · ${state.record.inspector}）已失效：${state.reasons.join('；')}。需重新登记。`,
+            field: kind
+          });
+        }
+        if (component.status === 'published' && !(state.valid && state.record?.conclusion === 'pass')) {
+          issues.push({
+            id: `${component.id}-${kind}-acceptance-missing`,
+            level: 'error',
+            componentId: component.id,
+            target: component.name,
+            message: `已发布组件缺少当前版本的有效${label}验收通过结论。`,
+            field: kind
+          });
+        } else if (component.status === 'review' && !state.record) {
+          issues.push({
+            id: `${component.id}-${kind}-acceptance-todo`,
+            level: 'info',
+            componentId: component.id,
+            target: component.name,
+            message: `尚未登记${label}验收记录，发布前两项验收都需对当前版本有效。`,
+            field: kind
+          });
+        }
+      }
       if (contractChanged && component.examples.length) {
         issues.push({ id: `${component.id}-contract`, level: 'info', componentId: component.id, target: component.name, message: '属性契约或交互签名发生变化，建议创建快照并迁移示例。', field: 'properties' });
       }
@@ -271,7 +368,7 @@ export class SpecStore extends EventTarget {
   private load(): WorkspaceState {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) return JSON.parse(saved) as WorkspaceState;
+      if (saved) return normalizeState(JSON.parse(saved) as WorkspaceState);
     } catch {
       // A corrupted local draft falls back to the bundled demo data.
     }

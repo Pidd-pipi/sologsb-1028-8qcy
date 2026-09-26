@@ -1,6 +1,27 @@
-import type { ComponentSpec, WorkspaceState } from './types';
+import { contentFingerprint, propertyContractFingerprint } from './acceptance';
+import type { AcceptanceKind, AcceptanceRecord, ComponentSpec, WorkspaceState } from './types';
 
 const now = '2026-09-25T08:00:00.000Z';
+
+/** 依据组件当前内容生成一条绑定当前版本的验收记录。 */
+const acceptanceFor = (
+  component: ComponentSpec,
+  kind: AcceptanceKind,
+  inspector: string,
+  basis: string,
+  overrides: Partial<AcceptanceRecord> = {}
+): AcceptanceRecord => ({
+  id: `acc-${component.id}-${kind}`,
+  kind,
+  inspector,
+  basis,
+  conclusion: 'pass',
+  checkedAt: now,
+  revision: component.revision,
+  contentFingerprint: contentFingerprint(component, kind),
+  contractFingerprint: propertyContractFingerprint(component),
+  ...overrides
+});
 
 const components: ComponentSpec[] = [
   {
@@ -42,7 +63,8 @@ const components: ComponentSpec[] = [
     ],
     revision: 3,
     updatedAt: now,
-    snapshots: []
+    snapshots: [],
+    acceptance: []
   },
   {
     id: 'field-spec',
@@ -74,7 +96,8 @@ const components: ComponentSpec[] = [
     ],
     revision: 2,
     updatedAt: now,
-    snapshots: []
+    snapshots: [],
+    acceptance: []
   },
   {
     id: 'dialog-spec',
@@ -106,9 +129,32 @@ const components: ComponentSpec[] = [
     ],
     revision: 2,
     updatedAt: now,
-    snapshots: []
+    snapshots: [],
+    acceptance: []
   }
 ];
+
+// Action button（已发布）：键盘与读屏验收均对当前版本有效。
+components[0].acceptance.push(
+  acceptanceFor(components[0], 'keyboard', '林岚', 'WCAG 2.2 键盘可操作走查：Tab 聚焦、Space/Enter 触发、焦点环清晰可见。'),
+  acceptanceFor(components[0], 'screenReader', '林岚', 'NVDA 2026.1 与 VoiceOver 实测：按钮名称、禁用与按下状态播报正确。')
+);
+
+// Labelled field（待审）：只有读屏验收，键盘验收未登记，发布会被拦截。
+components[1].acceptance.push(
+  acceptanceFor(components[1], 'screenReader', '赵启', 'VoiceOver 走查 label 关联与 aria-describedby 错误提示。')
+);
+
+// Modal dialog（草稿）：键盘验收登记于 r1，之后键盘行为与交互签名改过，记录已失效。
+components[2].acceptance.push(
+  acceptanceFor(
+    { ...components[2], keyboardBehavior: 'Esc 关闭。', interactionSignature: 'Esc 关闭' },
+    'keyboard',
+    '陈默',
+    '键盘走查：Esc 关闭与对话框内 Tab 循环。',
+    { revision: 1, checkedAt: '2026-09-24T09:30:00.000Z' }
+  )
+);
 
 export const createInitialState = (): WorkspaceState => ({
   components: structuredClone(components),
